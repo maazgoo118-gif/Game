@@ -2,152 +2,115 @@ require("dotenv").config();
 const express = require("express");
 const session = require("express-session");
 const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
 const multer = require("multer");
+const rateLimit = require("express-rate-limit");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
 const app = express();
-const PORT = Number(process.env.PORT || 3000);
-const ROOT = __dirname;
-const UPLOADS = path.join(ROOT, "uploads");
-const DATA_DIR = path.join(ROOT, "data");
-const DB_FILE = path.join(DATA_DIR, "records.json");
-
-for (const dir of [UPLOADS, DATA_DIR]) fs.mkdirSync(dir, { recursive: true });
-if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, "[]");
-
-if (!process.env.SESSION_SECRET || !process.env.ADMIN_PASSWORD) {
-  console.error("Set SESSION_SECRET and ADMIN_PASSWORD in your .env file.");
+const PORT = process.env.PORT || 3000;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const SESSION_SECRET = process.env.SESSION_SECRET;
+const IMAGE_ENCRYPTION_KEY = process.env.IMAGE_ENCRYPTION_KEY;
+if (!ADMIN_PASSWORD || ADMIN_PASSWORD.length < 14 || !SESSION_SECRET || SESSION_SECRET.length < 32 || !/^[a-f0-9]{64}$/i.test(IMAGE_ENCRYPTION_KEY || "")) {
+  console.error("Set ADMIN_PASSWORD (14+ chars), SESSION_SECRET (32+ chars), and IMAGE_ENCRYPTION_KEY (64 hex chars).");
   process.exit(1);
 }
 
+const encryptionKey = Buffer.from(IMAGE_ENCRYPTION_KEY, "hex");
+const uploadDir = path.join(__dirname, "uploads");
+const dataDir = path.join(__dirname, "data");
+const recordsFile = path.join(dataDir, "records.json");
+fs.mkdirSync(uploadDir, { recursive: true, mode: 0o700 });
+fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+if (!fs.existsSync(recordsFile)) fs.writeFileSync(recordsFile, "[]", { mode: 0o600 });
+function readRecords() { try { return JSON.parse(fs.readFileSync(recordsFile, "utf8")); } catch { return []; } }
+function writeRecords(records) { fs.writeFileSync(recordsFile, JSON.stringify(records, null, 2), { mode: 0o600 }); }
+function encryptBuffer(input) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", encryptionKey, iv);
+  const encrypted = Buffer.concat([cipher.update(input), cipher.final()]);
+  return Buffer.concat([Buffer.from("CP1"), iv, cipher.getAuthTag(), encrypted]);
+}
+function decryptBuffer(input) {
+  if (input.subarray(0, 3).toString() !== "CP1") throw new Error("Unknown encrypted image format");
+  const iv = input.subarray(3, 15), tag = input.subarray(15, 31), body = input.subarray(31);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(body), decipher.final()]);
+}
+
 app.set("trust proxy", 1);
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: "same-site" },
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "blob:", "data:"],
-      connectSrc: ["'self'"],
-      mediaSrc: ["'self'", "blob:"],
-      objectSrc: ["'none'"],
-      upgradeInsecureRequests: process.env.NODE_ENV === "production" ? [] : null
-    }
-  }
-}));
+app.disable("x-powered-by");
+app.use(helmet({ contentSecurityPolicy: false, referrerPolicy: { policy: "no-referrer" } }));
+app.use((req, res, next) => { res.setHeader("Cache-Control", "no-store"); res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive"); next(); });
 app.use(express.json({ limit: "100kb" }));
 app.use(session({
-  name: "trapcam.sid",
-  secret: process.env.SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    httpOnly: true,
-    sameSite: "strict",
-    secure: process.env.NODE_ENV === "production",
-    maxAge: 1000 * 60 * 60 * 8
-  }
+  name: "campro.sid", secret: SESSION_SECRET, resave: false, saveUninitialized: false,
+  cookie: { httpOnly: true, sameSite: "strict", secure: process.env.NODE_ENV === "production", maxAge: 2 * 60 * 60 * 1000, path: "/" }
 }));
+app.use(express.static(path.join(__dirname, "public"), { index: "index.html", dotfiles: "deny" }));
 
-const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false });
-const uploadLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false });
-
-function readRecords() {
-  try { return JSON.parse(fs.readFileSync(DB_FILE, "utf8")); } catch { return []; }
-}
-function writeRecords(records) {
-  const temp = DB_FILE + ".tmp";
-  fs.writeFileSync(temp, JSON.stringify(records, null, 2));
-  fs.renameSync(temp, DB_FILE);
-}
-function isAdmin(req, res, next) {
-  if (req.session && req.session.isAdmin) return next();
-  return res.status(401).json({ error: "يلزم تسجيل دخول صاحب المشروع." });
-}
-function safeEqual(a, b) {
-  const aa = Buffer.from(String(a));
-  const bb = Buffer.from(String(b));
-  return aa.length === bb.length && crypto.timingSafeEqual(aa, bb);
-}
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOADS),
-  filename: (_req, _file, cb) => cb(null, crypto.randomUUID() + ".jpg")
-});
-const upload = multer({
-  storage,
-  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
-  fileFilter: (_req, file, cb) => {
-    if (["image/jpeg", "image/png", "image/webp"].includes(file.mimetype)) cb(null, true);
-    else cb(new Error("يسمح فقط بملفات الصور."));
+const captureLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 15, standardHeaders: true, legacyHeaders: false });
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 5, standardHeaders: true, legacyHeaders: false });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 }, fileFilter: (_req, file, cb) => cb(null, /^image\/(jpeg|png|webp)$/.test(file.mimetype)) });
+function requireAdmin(req, res, next) { if (req.session?.isAdmin) return next(); return res.status(401).json({ error: "تسجيل الدخول مطلوب." }); }
+function requireSameOrigin(req, res, next) {
+  const origin = req.get("origin");
+  if (origin) {
+    try { if (new URL(origin).host !== req.get("host")) return res.sendStatus(403); }
+    catch { return res.sendStatus(403); }
   }
+  next();
+}
+app.use("/api/admin", requireSameOrigin);
+
+app.post("/api/capture", captureLimiter, upload.single("photo"), (req, res) => {
+  if (req.body.consent !== "true" || req.body.captureNoticeAccepted !== "true") return res.status(400).json({ error: "الموافقة المسبقة مطلوبة." });
+  if (!req.file || !req.file.mimetype.startsWith("image/")) return res.status(400).json({ error: "لم تصل صورة صالحة." });
+  try {
+    const id = crypto.randomUUID();
+    const filename = id + ".enc";
+    fs.writeFileSync(path.join(uploadDir, filename), encryptBuffer(req.file.buffer), { flag: "wx", mode: 0o600 });
+    const records = readRecords();
+    records.unshift({ id, filename, createdAt: new Date().toISOString() });
+    writeRecords(records);
+    res.json({ ok: true, id });
+  } catch (e) { console.error("Capture storage failed:", e.message); res.status(500).json({ error: "تعذر حفظ الصورة بأمان." }); }
 });
 
-app.use(express.static(path.join(ROOT, "public"), { extensions: ["html"] }));
-
-app.post("/api/login", loginLimiter, (req, res) => {
-  const password = req.body && req.body.password;
-  if (!safeEqual(password || "", process.env.ADMIN_PASSWORD)) {
-    return res.status(401).json({ error: "كلمة المرور غير صحيحة." });
-  }
+app.post("/api/admin/login", loginLimiter, (req, res) => {
+  const supplied = Buffer.from(String(req.body.password || ""));
+  const expected = Buffer.from(ADMIN_PASSWORD);
+  const valid = supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+  if (!valid) return res.status(401).json({ error: "كلمة المرور غير صحيحة." });
   req.session.regenerate(err => {
-    if (err) return res.status(500).json({ error: "تعذر إنشاء جلسة آمنة." });
+    if (err) return res.status(500).json({ error: "تعذر بدء الجلسة." });
     req.session.isAdmin = true;
-    res.json({ ok: true });
+    req.session.save(saveErr => saveErr ? res.status(500).json({ error: "تعذر حفظ الجلسة." }) : res.json({ ok: true }));
   });
 });
-
-app.post("/api/logout", isAdmin, (req, res) => {
-  req.session.destroy(() => res.clearCookie("trapcam.sid", { sameSite: "strict" }).json({ ok: true }));
-});
-app.get("/api/me", (req, res) => res.json({ isAdmin: !!(req.session && req.session.isAdmin) }));
-
-app.post("/api/photos", uploadLimiter, upload.single("photo"), (req, res) => {
-  if (!req.body || req.body.consent !== "yes") {
-    if (req.file) fs.unlinkSync(req.file.path);
-    return res.status(400).json({ error: "يلزم تأكيد الموافقة على إرسال الصورة." });
-  }
-  if (!req.file) return res.status(400).json({ error: "لم تصل صورة." });
-  const records = readRecords();
-  const item = {
-    id: crypto.randomUUID(),
-    filename: req.file.filename,
-    createdAt: new Date().toISOString(),
-    note: "أُرسلت بعد موافقة المشارك"
-  };
-  records.unshift(item);
-  writeRecords(records);
-  res.json({ ok: true, message: "وصلت الصورة إلى لوحة صاحب المشروع." });
-});
-
-app.get("/api/photos", isAdmin, (_req, res) => {
-  const records = readRecords().map(({ id, createdAt, note }) => ({ id, createdAt, note }));
-  res.json(records);
-});
-app.get("/api/photos/:id", isAdmin, (req, res) => {
+app.post("/api/admin/logout", requireAdmin, (req, res) => req.session.destroy(() => { res.clearCookie("campro.sid", { httpOnly: true, sameSite: "strict", secure: process.env.NODE_ENV === "production" }); res.json({ ok: true }); }));
+app.get("/api/admin/photos", requireAdmin, (_req, res) => res.json(readRecords().map(({ id, createdAt }) => ({ id, createdAt }))));
+app.get("/api/admin/photos/:id", requireAdmin, (req, res) => {
   const item = readRecords().find(x => x.id === req.params.id);
-  if (!item) return res.status(404).send("الصورة غير موجودة.");
-  res.type("jpg").sendFile(path.join(UPLOADS, item.filename));
+  if (!item || !/^[a-f0-9-]{36}\.enc$/i.test(item.filename)) return res.sendStatus(404);
+  try {
+    const plain = decryptBuffer(fs.readFileSync(path.join(uploadDir, item.filename)));
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Content-Disposition", "inline; filename=cam-pro.jpg");
+    res.setHeader("Cache-Control", "private, no-store");
+    res.send(plain);
+  } catch { res.status(500).json({ error: "تعذر فك تشفير الصورة." }); }
 });
-app.delete("/api/photos/:id", isAdmin, (req, res) => {
-  const records = readRecords();
-  const item = records.find(x => x.id === req.params.id);
-  if (!item) return res.status(404).json({ error: "الصورة غير موجودة." });
-  const file = path.join(UPLOADS, item.filename);
+app.delete("/api/admin/photos/:id", requireAdmin, (req, res) => {
+  const records = readRecords(); const item = records.find(x => x.id === req.params.id);
+  if (!item) return res.sendStatus(404);
+  const file = path.join(uploadDir, item.filename);
   if (fs.existsSync(file)) fs.unlinkSync(file);
   writeRecords(records.filter(x => x.id !== req.params.id));
   res.json({ ok: true });
 });
-
-app.use((err, _req, res, _next) => {
-  console.error(err.message);
-  if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE")
-    return res.status(413).json({ error: "حجم الصورة أكبر من 5 ميغابايت." });
-  res.status(400).json({ error: err.message || "حدث خطأ غير متوقع." });
-});
-
-app.listen(PORT, () => console.log(`TRAP CAM running at http://localhost:${PORT}`));
+app.get("/admin", (_req, res) => res.sendFile(path.join(__dirname, "public", "admin.html")));
+app.listen(PORT, "0.0.0.0", () => console.log(`CAM PRO listening on ${PORT}`));
