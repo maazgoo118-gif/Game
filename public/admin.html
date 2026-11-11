@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>لوحة TRAP CAM</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<header class="top"><div class="brand">🪤 TRAP <span>CAM</span></div><a href="/" class="small-link">العودة للعبة</a></header>
+<main class="shell">
+  <section id="loginPanel" class="panel">
+    <h2>🔐 دخول صاحب المشروع</h2><p>هذه المنطقة خاصة بصاحب المشروع.</p>
+    <form id="loginForm"><input id="password" type="password" placeholder="كلمة المرور" autocomplete="current-password" required><button class="primary" type="submit">تسجيل الدخول</button></form>
+    <p id="loginMsg" class="message" aria-live="polite"></p>
+  </section>
+  <section id="dashboard" class="panel hidden">
+    <div class="dash-head"><div><h2>معرض الصور</h2><p id="count" class="muted"></p></div><button id="logout" class="secondary">تسجيل الخروج</button></div>
+    <div id="photos" class="photo-grid"></div>
+    <p id="empty" class="muted hidden">لا توجد صور محفوظة حتى الآن.</p>
+    <p class="muted">استخدم الفلاتر لمعاينة الصورة ثم نزّل النسخة المعدلة أو شاركها بنفسك.</p>
+  </section>
+</main>
+<script src="/admin.js"></script>
+</body></html>
