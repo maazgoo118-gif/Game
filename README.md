@@ -1,33 +1,48 @@
 # CAM PRO
-لعبة عدّ من 1 إلى 100. بعد إبلاغ المشارك بوضوح وأخذ موافقته الصريحة، تُلتقط الصورة فور تشغيل الكاميرا دون عرض معاينتها، ثم تبدأ اللعبة.
 
-## إعداد الأسرار
-أنشئ قيماً عشوائية ولا تستخدم كلمات مرور سبق نشرها أو مشاركتها:
-- `ADMIN_PASSWORD`: كلمة مرور فريدة بطول 14 حرفاً على الأقل.
-- `SESSION_SECRET`: سر عشوائي لا يقل عن 32 حرفاً.
-- `IMAGE_ENCRYPTION_KEY`: مفتاح عشوائي من 64 خانة hex (32 بايت). مثال توليد محلي: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
-- `NODE_ENV=production`
+CAM PRO is a consent-based camera game. Before the camera is requested, the participant must read and accept the notice explaining that a photo is captured immediately after permission is granted and uploaded to the private owner gallery. Do not use this project to capture or upload anyone's image without their informed, explicit consent.
 
-ضع القيم في Environment Variables لدى الاستضافة فقط، وليس في GitHub أو ملفات المشروع. احتفظ بنسخة آمنة من `IMAGE_ENCRYPTION_KEY`: فقدانه يعني تعذر فك تشفير الصور القديمة. لا تشارك هذا المفتاح أو كلمة المرور.
+## Storage and deployment
+- Images are encrypted in the Node.js server with AES-256-GCM before upload.
+- Encrypted image files are stored in the **private** Supabase Storage bucket `cam-pro-photos`.
+- Metadata is stored in `public.cam_pro_photos`.
+- The Supabase secret key is server-side only. Never place it in browser JavaScript or commit it to GitHub.
+- No image files or database records are stored on the Render filesystem.
+- The admin login cookie is signed, HTTP-only, SameSite Strict, and expires after two hours. It is stateless; logging out clears it.
 
-## التشغيل
-1. Node.js 20 أو أحدث.
-2. `npm install`
-3. اضبط متغيرات البيئة أعلاه.
-4. `npm start`
-5. افتح `/` للعبة و`/admin` للوحة الإدارة.
+## Supabase SQL
+Run once in Supabase SQL Editor:
 
-## النشر على Render
-- Build Command: `npm install`
-- Start Command: `npm start`
-- أضف المتغيرات السرية من صفحة Environment، ولا تضعها في المستودع.
-- استخدم HTTPS وPersistent Disk لمساري `uploads` و`data`، أو قاعدة تخزين دائمة مناسبة. الملفات المشفرة والبيانات الوصفية محفوظة في هذين المسارين.
-- لا تجعل `uploads` مساراً عاماً ولا تضف خادماً ثابتاً له.
+```sql
+CREATE TABLE IF NOT EXISTS public.cam_pro_photos (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  storage_path text NOT NULL UNIQUE,
+  mime_type text NOT NULL DEFAULT 'image/jpeg',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE public.cam_pro_photos ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.cam_pro_photos FROM anon, authenticated;
+```
 
-## الحماية والخصوصية
-- الصور تُشفّر على الخادم باستخدام AES-256-GCM، ولا يمكن عرضها إلا عبر مسار إداري يتطلب جلسة مدير موثقة.
-- لا توجد روابط عامة للصور، وتُستخدم ملفات تعريف ارتباط HttpOnly وSameSite=Strict، مع حدود لمحاولات تسجيل الدخول.
-- جلسات `express-session` الافتراضية محفوظة في الذاكرة؛ عند إعادة تشغيل الخدمة تنتهي الجلسات. للاستخدام عالي الاعتمادية، أضف مخزن جلسات دائم ومداراً.
-- حماية التطبيق لا تعني استحالة الاختراق. احمِ حساب الاستضافة ومستودع GitHub ومفتاح التشفير، وفعّل المصادقة متعددة العوامل حيث تتوفر.
-- أخبر المشارك قبل الإذن أن الصورة ستُلتقط فور تشغيل الكاميرا وتُرسل إلى المعرض الخاص. عدم عرض معاينة الكاميرا لا يلغي ضرورة الموافقة الواضحة.
-- مشاركة الصور يدوية فقط، وبموافقة صاحب الصورة. ضع سياسة حذف واحتفاظ واضحة.
+If the table already exists from an earlier setup, run this additional statement:
+
+```sql
+ALTER TABLE public.cam_pro_photos ADD COLUMN IF NOT EXISTS mime_type text NOT NULL DEFAULT 'image/jpeg';
+```
+
+Create a **private** Storage bucket named `cam-pro-photos`. Do not add public read policies. The server uses the Supabase secret key to access Storage and the table.
+
+## Render environment variables
+Set these in Render Dashboard > your Web Service > Environment:
+- `ADMIN_PASSWORD`: unique password, at least 14 characters.
+- `SESSION_SECRET`: random secret, at least 32 characters.
+- `IMAGE_ENCRYPTION_KEY`: exactly 64 hexadecimal characters (32 random bytes). Keep a secure backup; losing it makes stored images unrecoverable.
+- `SUPABASE_URL`: project URL.
+- `SUPABASE_SECRET_KEY`: Supabase server secret key (`sb_secret_...`). Never expose it to the browser.
+- `SUPABASE_BUCKET`: `cam-pro-photos`.
+- `NODE_ENV`: `production`.
+
+Build command: `npm install`
+Start command: `npm start`
+
+Use Node 20 or newer. Check `/health` after deployment. Test consent, upload, admin login, image viewing, deletion, and logout before sharing the app.
